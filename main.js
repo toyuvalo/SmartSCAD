@@ -2,9 +2,9 @@ const { app, BrowserWindow, ipcMain, Menu, dialog, shell } = require('electron')
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const pty = require('node-pty');
 const chokidar = require('chokidar');
 const { execFile, spawn } = require('child_process');
+const { createProvider } = require('./providers');
 
 // Auto-detect OpenSCAD on Windows if not in PATH
 function findOpenSCAD() {
@@ -21,10 +21,65 @@ function findOpenSCAD() {
   return 'openscad';
 }
 const OPENSCAD_BIN = findOpenSCAD();
-const DEFAULT_SHELL = process.platform === 'win32'
-  ? (process.env.COMSPEC || 'cmd.exe')
-  : (process.env.SHELL || '/bin/bash');
 const STATE_FILE = 'clawscad.json';
+let SETTINGS_FILE = path.join(os.homedir(), 'smartscad-settings.json'); // overridden after app ready
+
+const SMARTSCAD_TOOLS = [
+  {
+    name: 'create_scad_file',
+    description: 'Create a new immutable OpenSCAD .scad file checkpoint in the workspace. The first line MUST be a comment describing what changed. Use a creative kebab-case filename (max 30 chars). Never reuse an existing filename.',
+    parameters: {
+      type: 'object',
+      properties: {
+        filename: { type: 'string', description: 'kebab-case .scad filename, max 30 chars' },
+        content: { type: 'string', description: 'Full OpenSCAD source code, first line must be a comment' },
+      },
+      required: ['filename', 'content'],
+    },
+  },
+  {
+    name: 'read_file',
+    description: 'Read a file from the workspace',
+    parameters: {
+      type: 'object',
+      properties: { path: { type: 'string', description: 'Filename relative to workspace' } },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'list_files',
+    description: 'List .scad checkpoint files in the workspace',
+    parameters: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'validate_scad',
+    description: 'Validate OpenSCAD syntax. Returns errors if any. Always validate before finalizing.',
+    parameters: {
+      type: 'object',
+      properties: { content: { type: 'string', description: 'OpenSCAD source to validate' } },
+      required: ['content'],
+    },
+  },
+];
+
+function loadSettings() {
+  try {
+    if (fs.existsSync(SETTINGS_FILE)) return JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8'));
+  } catch {}
+  return {
+    activeProvider: 'anthropic',
+    providers: {
+      anthropic: { provider: 'anthropic', apiKey: '', model: 'claude-opus-4-5' },
+      openai:    { provider: 'openai',    apiKey: '', model: 'gpt-4o' },
+      gemini:    { provider: 'gemini',    apiKey: '', model: 'gemini-2.0-flash' },
+      ollama:    { provider: 'ollama',    apiKey: '', model: 'llama3.2' },
+    },
+  };
+}
+
+function saveSettings(settings) {
+  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
+}
 const ACTIVE_FILE = 'active.scad';
 const MAX_WINDOWS = 4;
 
@@ -201,10 +256,11 @@ function openWindow(wsDir) {
     workspaceDir: wsDir,
     state: { checkpoints: {}, active: null },
     fileWatcher: null,
-    ptyProcess: null,
     renderQueue: [],
     isRendering: false,
     renderFormat: '3mf',
+    chatHistory: [],
+    chatAbortController: null,
   };
 
   const wcId = win.webContents.id;
@@ -216,12 +272,9 @@ function openWindow(wsDir) {
   loadState(ctx);
   startFileWatcher(ctx);
 
-  win.setTitle(`ClawSCAD — ${ctx.workspaceDir}`);
+  win.setTitle(`SmartSCAD — ${ctx.workspaceDir}`);
 
   win.webContents.once('did-finish-load', () => {
-    // Start terminal here so the renderer is already listening for 'terminal:data'
-    // and won't miss Claude's initial output.
-    startTerminal(ctx);
     sendCheckpoints(ctx);
     if (ctx.state.active && ctx.state.checkpoints[ctx.state.active]) {
       const cp = ctx.state.checkpoints[ctx.state.active];
@@ -241,8 +294,7 @@ function openWindow(wsDir) {
 
   win.on('closed', () => {
     if (ctx.fileWatcher) ctx.fileWatcher.close();
-    if (ctx.ptyProcess) try { ctx.ptyProcess.kill(); } catch {}
-    if (ctx.ptyProcess2) try { ctx.ptyProcess2.kill(); } catch {}
+    if (ctx.chatAbortController) ctx.chatAbortController.abort();
     ctx.window = null; // Mark as destroyed so ctxSend won't touch it
     windows.delete(wcId);
     updateAllClaudeMd();
@@ -334,24 +386,6 @@ function writeClaudeMd(ctx, allWorkspaces) {
 
 function initWorkspace(ctx) {
   fs.mkdirSync(ctx.workspaceDir, { recursive: true });
-
-  // MCP server config — merge into existing settings
-  const claudeDir = path.join(ctx.workspaceDir, '.claude');
-  const settingsFile = path.join(claudeDir, 'settings.json');
-  fs.mkdirSync(claudeDir, { recursive: true });
-  let settings = {};
-  try {
-    if (fs.existsSync(settingsFile)) {
-      settings = JSON.parse(fs.readFileSync(settingsFile, 'utf-8'));
-    }
-  } catch {}
-  if (!settings.mcpServers) settings.mcpServers = {};
-  settings.mcpServers.openscad = {
-    command: 'npx',
-    args: ['-y', 'openscad-mcp-server'],
-    env: { OPENSCAD_BINARY: OPENSCAD_BIN },
-  };
-  fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2));
 }
 
 // ── State Management ────────────────────────────────────────────────────
@@ -394,29 +428,6 @@ function extractDescription(scadPath) {
   return '';
 }
 
-function getEncodedCwd(dir) {
-  return dir.replace(/\//g, '-').replace(/^-/, '');
-}
-
-function detectCurrentSessionId(ctx) {
-  const encoded = getEncodedCwd(ctx.workspaceDir);
-  const projectDir = path.join(os.homedir(), '.claude', 'projects', encoded);
-  try {
-    if (!fs.existsSync(projectDir)) return null;
-    const files = fs
-      .readdirSync(projectDir)
-      .filter((f) => f.endsWith('.jsonl'))
-      .map((f) => ({
-        name: path.basename(f, '.jsonl'),
-        mtime: fs.statSync(path.join(projectDir, f)).mtimeMs,
-      }))
-      .sort((a, b) => b.mtime - a.mtime);
-    return files.length > 0 ? files[0].name : null;
-  } catch {
-    return null;
-  }
-}
-
 function addCheckpoint(ctx, scadFile) {
   const basename = path.basename(scadFile);
 
@@ -425,7 +436,6 @@ function addCheckpoint(ctx, scadFile) {
   if (basename === ACTIVE_FILE) return;
 
   const description = extractDescription(scadFile);
-  const sessionId = detectCurrentSessionId(ctx);
 
   const id = generateId();
   ctx.state.checkpoints[id] = {
@@ -433,7 +443,6 @@ function addCheckpoint(ctx, scadFile) {
     parent: ctx.state.active,
     label: path.basename(basename, '.scad').replace(/[_-]/g, ' ').substring(0, 30),
     description,
-    sessionId,
     created: new Date().toISOString(),
   };
 
@@ -551,17 +560,10 @@ function writeRenderErrors(ctx, filename, errorText, errors) {
       `## Raw Output\n\`\`\`\n${errorText.substring(0, 2000)}\n\`\`\`\n`
   );
 
-  // Send a nudge to Claude's terminal — a visible prompt that there are errors to fix
-  if (ctx.ptyProcess) {
-    // Only nudge if Claude seems idle (don't interrupt mid-generation)
-    // Write to pty so it appears in the conversation as user input
-    const nudge =
-      `The render of ${filename} failed. Read RENDER_ERRORS.md for details and create a fixed version.\n`;
-    // Small delay to avoid interrupting Claude mid-output
-    setTimeout(() => {
-      if (ctx.ptyProcess) ctx.ptyProcess.write(nudge);
-    }, 2000);
-  }
+  // Notify the chat UI about the render error
+  ctxSend(ctx, 'chat:system', {
+    message: `Render failed for ${filename}. Check RENDER_ERRORS.md in the workspace for details.`,
+  });
 }
 
 function clearRenderErrors(ctx) {
@@ -603,103 +605,6 @@ function sendFileContent(ctx, scadFilename) {
   } catch {}
 }
 
-// ── Session Discovery ───────────────────────────────────────────────────
-
-function discoverSessions(ctx) {
-  const encoded = getEncodedCwd(ctx.workspaceDir);
-  const projectDir = path.join(os.homedir(), '.claude', 'projects', encoded);
-  const sessions = [];
-  try {
-    if (!fs.existsSync(projectDir)) return sessions;
-    const files = fs.readdirSync(projectDir).filter((f) => f.endsWith('.jsonl'));
-    for (const file of files) {
-      const sessionId = path.basename(file, '.jsonl');
-      const fp = path.join(projectDir, file);
-      const stat = fs.statSync(fp);
-      let firstMessage = '';
-      try {
-        const content = fs.readFileSync(fp, 'utf-8');
-        for (const line of content.split('\n').filter(Boolean)) {
-          try {
-            const entry = JSON.parse(line);
-            if (entry.type === 'user' && entry.message) {
-              const msg = typeof entry.message === 'string'
-                ? entry.message
-                : entry.message.content || JSON.stringify(entry.message);
-              firstMessage = msg.substring(0, 80);
-              break;
-            }
-          } catch {}
-        }
-      } catch {}
-      sessions.push({ sessionId, firstMessage, lastModified: stat.mtimeMs, date: stat.mtime.toISOString() });
-    }
-    sessions.sort((a, b) => b.lastModified - a.lastModified);
-  } catch {}
-  return sessions;
-}
-
-// ── Terminal ────────────────────────────────────────────────────────────
-
-function spawnPty(ctx, cmd, args = []) {
-  const proc = pty.spawn(cmd, args, {
-    name: 'xterm-256color',
-    cols: 80,
-    rows: 24,
-    cwd: ctx.workspaceDir,
-    env: { ...process.env, COLORTERM: 'truecolor' },
-    ...(process.platform === 'win32' && { useConpty: false }),
-  });
-  proc.onData((data) => ctxSend(ctx, 'terminal:data', data));
-  return proc;
-}
-
-function spawnPty2(ctx, cmd, args = []) {
-  const proc = pty.spawn(cmd, args, {
-    name: 'xterm-256color',
-    cols: 80,
-    rows: 24,
-    cwd: ctx.workspaceDir,
-    env: { ...process.env, COLORTERM: 'truecolor' },
-    ...(process.platform === 'win32' && { useConpty: false }),
-  });
-  proc.onData((data) => ctxSend(ctx, 'terminal2:data', data));
-  return proc;
-}
-
-function startTerminal(ctx) {
-  try {
-    ctx.ptyProcess = spawnPty(ctx, 'claude', []);
-  } catch {
-    ctx.ptyProcess = spawnPty(ctx, DEFAULT_SHELL, []);
-  }
-  ctx.ptyProcess.onExit(() => {
-    try {
-      ctx.ptyProcess = spawnPty(ctx, 'claude', []);
-    } catch {
-      ctx.ptyProcess = spawnPty(ctx, DEFAULT_SHELL, []);
-    }
-    ctx.ptyProcess.onExit(() => {});
-  });
-}
-
-function restartTerminal(ctx, args = []) {
-  if (ctx.ptyProcess) try { ctx.ptyProcess.kill(); } catch {}
-  try {
-    ctx.ptyProcess = spawnPty(ctx, 'claude', args);
-  } catch {
-    ctx.ptyProcess = spawnPty(ctx, DEFAULT_SHELL, []);
-  }
-  ctx.ptyProcess.onExit(() => {
-    try {
-      ctx.ptyProcess = spawnPty(ctx, 'claude', []);
-    } catch {
-      ctx.ptyProcess = spawnPty(ctx, DEFAULT_SHELL, []);
-    }
-    ctx.ptyProcess.onExit(() => {});
-  });
-}
-
 // ── File Watcher ────────────────────────────────────────────────────────
 
 function startFileWatcher(ctx) {
@@ -739,44 +644,165 @@ function handleFileEvent(ctx, filePath) {
 
 // ── IPC Handlers ────────────────────────────────────────────────────────
 
-ipcMain.on('terminal:input', (event, data) => {
-  const ctx = getCtx(event);
-  if (ctx && ctx.ptyProcess) ctx.ptyProcess.write(data);
+// ── Chat IPC Handlers ────────────────────────────────────────────────────
+
+ipcMain.handle('settings:get', () => loadSettings());
+
+ipcMain.handle('settings:save', (_, settings) => {
+  saveSettings(settings);
+  return true;
 });
 
-ipcMain.handle('terminal2:spawn', (event) => {
+ipcMain.handle('chat:history', (event) => {
   const ctx = getCtx(event);
-  if (!ctx || ctx.ptyProcess2) return;
+  return ctx ? ctx.chatHistory.filter(m => m.role === 'user' || m.role === 'assistant') : [];
+});
+
+ipcMain.handle('chat:clear', (event) => {
+  const ctx = getCtx(event);
+  if (ctx) ctx.chatHistory = [];
+  return true;
+});
+
+ipcMain.on('chat:abort', (event) => {
+  const ctx = getCtx(event);
+  if (ctx?.chatAbortController) {
+    ctx.chatAbortController.abort();
+    ctx.chatAbortController = null;
+  }
+});
+
+ipcMain.handle('chat:send', async (event, userMessage) => {
+  const ctx = getCtx(event);
+  if (!ctx) return;
+
+  const settings = loadSettings();
+  const providerConfig = settings.providers[settings.activeProvider];
+
+  let provider;
   try {
-    ctx.ptyProcess2 = spawnPty2(ctx, 'claude', []);
-  } catch {
-    ctx.ptyProcess2 = spawnPty2(ctx, DEFAULT_SHELL, []);
+    provider = createProvider(providerConfig);
+  } catch (err) {
+    ctxSend(ctx, 'chat:error', { message: `Provider error: ${err.message}` });
+    return;
   }
-  ctx.ptyProcess2.onExit(() => { ctx.ptyProcess2 = null; });
-});
 
-ipcMain.handle('terminal2:kill', (event) => {
-  const ctx = getCtx(event);
-  if (ctx && ctx.ptyProcess2) {
-    try { ctx.ptyProcess2.kill(); } catch {}
-    ctx.ptyProcess2 = null;
+  ctx.chatHistory.push({ role: 'user', content: userMessage });
+  ctx.chatAbortController = new AbortController();
+
+  const systemPrompt = buildSystemPrompt(ctx);
+  const MAX_TOOL_ROUNDS = 10;
+  let round = 0;
+
+  try {
+    while (round++ < MAX_TOOL_ROUNDS) {
+      const toolCalls = [];
+      let assistantText = '';
+
+      const messages = [
+        { role: 'system', content: systemPrompt },
+        ...ctx.chatHistory,
+      ];
+
+      for await (const ev of provider.streamChat(messages, SMARTSCAD_TOOLS, ctx.chatAbortController.signal)) {
+        if (ev.type === 'text_delta') {
+          assistantText += ev.text;
+          ctxSend(ctx, 'chat:stream', { text: ev.text });
+        } else if (ev.type === 'tool_call') {
+          toolCalls.push(ev);
+          ctxSend(ctx, 'chat:tool_call', { name: ev.name, input: ev.input });
+        } else if (ev.type === 'error') {
+          ctxSend(ctx, 'chat:error', { message: ev.message });
+          return;
+        }
+      }
+
+      ctx.chatHistory.push({ role: 'assistant', content: assistantText, toolCalls });
+
+      if (toolCalls.length === 0) break;
+
+      const toolResults = [];
+      for (const call of toolCalls) {
+        let result;
+        try {
+          result = await executeSmartSCADTool(ctx, call.name, call.input);
+        } catch (err) {
+          result = { error: err.message };
+        }
+        toolResults.push({ callId: call.callId, result });
+        ctxSend(ctx, 'chat:tool_result', { name: call.name, input: call.input, result });
+      }
+
+      ctx.chatHistory.push({ role: 'tool_result', results: toolResults });
+    }
+  } catch (err) {
+    if (err.name !== 'AbortError') {
+      ctxSend(ctx, 'chat:error', { message: err.message });
+    }
   }
+
+  ctxSend(ctx, 'chat:done', {});
+  ctx.chatAbortController = null;
 });
 
-ipcMain.on('terminal2:input', (event, data) => {
-  const ctx = getCtx(event);
-  if (ctx && ctx.ptyProcess2) ctx.ptyProcess2.write(data);
-});
+async function executeSmartSCADTool(ctx, toolName, input) {
+  switch (toolName) {
+    case 'create_scad_file': {
+      let filename = (input.filename || 'model.scad').replace(/[^a-zA-Z0-9._-]/g, '-');
+      if (!filename.endsWith('.scad')) filename += '.scad';
+      if (filename.length > 34) filename = filename.slice(0, 30) + '.scad';
+      const filePath = path.join(ctx.workspaceDir, filename);
+      if (fs.existsSync(filePath)) {
+        return { error: `File ${filename} already exists. Choose a different name.` };
+      }
+      fs.writeFileSync(filePath, input.content, 'utf-8');
+      return { success: true, path: filePath, filename };
+    }
+    case 'read_file': {
+      const filePath = path.isAbsolute(input.path)
+        ? input.path
+        : path.join(ctx.workspaceDir, input.path);
+      try {
+        return { content: fs.readFileSync(filePath, 'utf-8') };
+      } catch {
+        return { error: 'File not found: ' + input.path };
+      }
+    }
+    case 'list_files': {
+      const files = fs.readdirSync(ctx.workspaceDir)
+        .filter(f => f.endsWith('.scad') && f !== ACTIVE_FILE);
+      return { files };
+    }
+    case 'validate_scad': {
+      const tmpFile = path.join(os.tmpdir(), `smartscad_${Date.now()}.scad`);
+      fs.writeFileSync(tmpFile, input.content);
+      return new Promise(resolve => {
+        execFile(OPENSCAD_BIN, ['--check', tmpFile], { timeout: 15000 }, (err, _stdout, stderr) => {
+          try { fs.unlinkSync(tmpFile); } catch {}
+          if (err || (stderr && stderr.trim())) {
+            resolve({ valid: false, errors: (stderr || err?.message || '').trim() });
+          } else {
+            resolve({ valid: true });
+          }
+        });
+      });
+    }
+    default:
+      return { error: `Unknown tool: ${toolName}` };
+  }
+}
 
-ipcMain.on('terminal2:resize', (event, { cols, rows }) => {
-  const ctx = getCtx(event);
-  if (ctx && ctx.ptyProcess2) try { ctx.ptyProcess2.resize(cols, rows); } catch {}
-});
-
-ipcMain.on('terminal:resize', (event, { cols, rows }) => {
-  const ctx = getCtx(event);
-  if (ctx && ctx.ptyProcess) try { ctx.ptyProcess.resize(cols, rows); } catch {}
-});
+function buildSystemPrompt(ctx) {
+  const live = Array.from(windows.values()).filter(c => c.window !== null);
+  const allWorkspaces = live.map(c => c.workspaceDir);
+  const others = allWorkspaces.filter(w => w !== ctx.workspaceDir);
+  let prompt = `# SmartSCAD Workspace — MANDATORY RULES\n\n${CLAUDE_MD_RULES}\n`;
+  prompt += `\nCurrent workspace: ${ctx.workspaceDir}\n`;
+  if (others.length > 0) {
+    prompt += `Other open workspaces: ${others.join(', ')}\n`;
+  }
+  return prompt;
+}
 
 ipcMain.handle('workspace:get', (event) => {
   const ctx = getCtx(event);
@@ -806,41 +832,12 @@ ipcMain.handle('checkpoint:list', (event) => {
   return ctx ? ctx.state : { checkpoints: {}, active: null };
 });
 
-ipcMain.handle('sessions:list', (event) => {
-  const ctx = getCtx(event);
-  return ctx ? discoverSessions(ctx) : [];
-});
-
-ipcMain.handle('sessions:new', (event) => {
-  const ctx = getCtx(event);
-  if (ctx) restartTerminal(ctx, []);
-});
-
-ipcMain.handle('sessions:continue', (event) => {
-  const ctx = getCtx(event);
-  if (ctx) restartTerminal(ctx, ['--continue']);
-});
-
-ipcMain.handle('sessions:resume', (event, sessionId) => {
-  const ctx = getCtx(event);
-  if (ctx) restartTerminal(ctx, ['--resume', sessionId]);
-});
 
 ipcMain.handle('checkpoint:select', (event, id) => {
   const ctx = getCtx(event);
   if (ctx) selectCheckpoint(ctx, id);
 });
 
-ipcMain.handle('checkpoint:restore-session', (event, id) => {
-  const ctx = getCtx(event);
-  if (!ctx) return false;
-  const cp = ctx.state.checkpoints[id];
-  if (cp && cp.sessionId) {
-    restartTerminal(ctx, ['--resume', cp.sessionId]);
-    return true;
-  }
-  return false;
-});
 
 ipcMain.handle('checkpoint:rename', (event, id, label) => {
   const ctx = getCtx(event);
@@ -934,13 +931,12 @@ ipcMain.handle('app:open-workspace', async (event) => {
   if (!result.canceled && result.filePaths[0]) {
     // Replace this window's workspace
     if (ctx.fileWatcher) ctx.fileWatcher.close();
-    if (ctx.ptyProcess) try { ctx.ptyProcess.kill(); } catch {}
     ctx.workspaceDir = result.filePaths[0];
+    ctx.chatHistory = [];
     initWorkspace(ctx);
     loadState(ctx);
-    startTerminal(ctx);
     startFileWatcher(ctx);
-    ctx.window.setTitle(`ClawSCAD — ${ctx.workspaceDir}`);
+    ctx.window.setTitle(`SmartSCAD — ${ctx.workspaceDir}`);
     sendCheckpoints(ctx);
     updateAllClaudeMd();
     return ctx.workspaceDir;
@@ -1050,13 +1046,12 @@ ipcMain.handle('app:open-path', async (event, inputPath) => {
     if (stat.isDirectory()) {
       // Switch workspace to this directory
       if (ctx.fileWatcher) ctx.fileWatcher.close();
-      if (ctx.ptyProcess) try { ctx.ptyProcess.kill(); } catch {}
       ctx.workspaceDir = inputPath;
+      ctx.chatHistory = [];
       initWorkspace(ctx);
       loadState(ctx);
-      startTerminal(ctx);
       startFileWatcher(ctx);
-      ctx.window.setTitle(`ClawSCAD — ${ctx.workspaceDir}`);
+      ctx.window.setTitle(`SmartSCAD — ${ctx.workspaceDir}`);
       sendCheckpoints(ctx);
       updateAllClaudeMd();
       addRecentPath(inputPath);
@@ -1082,11 +1077,14 @@ ipcMain.handle('app:window-count', () => windows.size);
 // ── App Lifecycle ───────────────────────────────────────────────────────
 
 app.whenReady().then(async () => {
+  // Now that app is ready, we can use app.getPath()
+  SETTINGS_FILE = path.join(app.getPath('userData'), 'smartscad-settings.json');
+
   // Start the MCP server early so it's warm by the time we need it
   mcpClient.start().catch(() => {});
 
   const cliArg = process.argv.slice(2).find((a) => !a.startsWith('-'));
-  const wsDir = cliArg ? path.resolve(cliArg) : path.join(os.homedir(), 'clawscad-workspace');
+  const wsDir = cliArg ? path.resolve(cliArg) : path.join(os.homedir(), 'smartscad-workspace');
   openWindow(wsDir);
 });
 

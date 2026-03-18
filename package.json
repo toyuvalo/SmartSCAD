@@ -1,10 +1,9 @@
 {
-  "name": "clawscad",
+  "name": "smartscad",
   "version": "0.1.0",
-  "description": "AI-powered 3D CAD — OpenSCAD + Claude Code with checkpoint branching",
+  "description": "AI-powered 3D CAD with multi-provider support (Claude, GPT-4, Gemini, Ollama) + OpenSCAD checkpoint branching",
   "main": "main.js",
   "scripts": {
-    "postinstall": "node scripts/postinstall.js",
     "build:renderer": "node -e \"require('fs').mkdirSync('dist',{recursive:true})\" && esbuild renderer.js --bundle --outfile=dist/renderer.js --format=esm --platform=browser --loader:.ttf=file",
     "start": "npm run build:renderer && electron .",
     "dev": "npm run build:renderer && electron . --dev",
@@ -17,11 +16,10 @@
     "dist:mac": "npm run build:renderer && electron-builder --mac"
   },
   "dependencies": {
-    "@xterm/addon-fit": "^0.10.0",
-    "@xterm/xterm": "^5.5.0",
+    "@anthropic-ai/sdk": "^0.39.0",
     "chokidar": "^3.6.0",
     "monaco-editor": "^0.55.1",
-    "node-pty": "^1.1.0",
+    "openai": "^4.77.0",
     "three": "^0.170.0"
   },
   "devDependencies": {
@@ -33,18 +31,18 @@
     "esbuild": "^0.24.0"
   },
   "build": {
-    "appId": "com.clawscad.app",
+    "appId": "com.smartscad.app",
     "directories": {
       "output": "release"
     },
-    "productName": "ClawSCAD",
+    "productName": "SmartSCAD",
     "files": [
       "main.js",
       "preload.js",
+      "providers.js",
       "index.html",
       "style.css",
       "icon.png",
-      "scripts/**/*",
       "dist/**/*",
       "node_modules/**/*",
       "!node_modules/.cache"

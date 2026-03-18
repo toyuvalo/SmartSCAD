@@ -1,5 +1,3 @@
-import { Terminal } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
 import * as THREE from 'three';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -189,110 +187,186 @@ window.api.onFileContent((data) => {
   if (model) monaco.editor.setModelMarkers(model, 'openscad', []);
 });
 
-// ── Terminal Setup ──────────────────────────────────────────────────────
+// ── Chat UI ──────────────────────────────────────────────────────────────
 
-const term = new Terminal({
-  fontSize: 14,
-  fontFamily: '"JetBrains Mono", Menlo, Monaco, "Courier New", monospace',
-  theme: {
-    background: '#0d0d1a',
-    foreground: '#d0d0e0',
-    cursor: '#d0d0e0',
-    cursorAccent: '#0d0d1a',
-    selectionBackground: '#33336688',
-    black: '#1a1a2e',
-    red: '#ff5555',
-    green: '#50fa7b',
-    yellow: '#f1fa8c',
-    blue: '#6272a4',
-    magenta: '#ff79c6',
-    cyan: '#8be9fd',
-    white: '#d0d0e0',
-    brightBlack: '#44447a',
-    brightRed: '#ff6e6e',
-    brightGreen: '#69ff94',
-    brightYellow: '#ffffa5',
-    brightBlue: '#d6acff',
-    brightMagenta: '#ff92df',
-    brightCyan: '#a4ffff',
-    brightWhite: '#ffffff',
-  },
-  cursorBlink: true,
-  allowProposedApi: true,
-});
+const chatMessages = document.getElementById('chat-messages');
+const chatInput = document.getElementById('chat-input');
+const chatSendBtn = document.getElementById('chat-send');
+const chatClearBtn = document.getElementById('chat-clear-btn');
+const settingsBtn = document.getElementById('settings-btn');
+const settingsPanel = document.getElementById('settings-panel');
+const settingsSaveBtn = document.getElementById('settings-save-btn');
+const providerSelect = document.getElementById('provider-select');
 
-const fitAddon = new FitAddon();
-term.loadAddon(fitAddon);
+let streamingEl = null;
+let isSending = false;
 
-const termEl = document.getElementById('terminal');
-term.open(termEl);
-fitAddon.fit();
-term.focus();
-termEl.addEventListener('click', () => term.focus());
-
-window.api.onTerminalData((data) => term.write(data));
-term.onData((data) => window.api.sendTerminalInput(data));
-term.onResize(({ cols, rows }) => window.api.resizeTerminal(cols, rows));
-
-// ── Second Terminal ─────────────────────────────────────────────────────
-
-let term2 = null;
-let fitAddon2 = null;
-
-document.getElementById('add-terminal-btn').addEventListener('click', async () => {
-  const pane1 = document.getElementById('terminal-pane-1');
-  if (!pane1.classList.contains('hidden')) return; // already open
-
-  pane1.classList.remove('hidden');
-
-  // Create second terminal
-  term2 = new Terminal({
-    fontSize: 14,
-    fontFamily: '"JetBrains Mono", Menlo, Monaco, "Courier New", monospace',
-    theme: term.options.theme,
-    cursorBlink: true,
-    allowProposedApi: true,
-  });
-  fitAddon2 = new FitAddon();
-  term2.loadAddon(fitAddon2);
-
-  const termEl2 = document.getElementById('terminal-2');
-  term2.open(termEl2);
-  fitAddon2.fit();
-  term2.focus();
-  termEl2.addEventListener('click', () => term2.focus());
-
-  window.api.onTerminal2Data((data) => { if (term2) term2.write(data); });
-  term2.onData((data) => window.api.sendTerminal2Input(data));
-  term2.onResize(({ cols, rows }) => window.api.resizeTerminal2(cols, rows));
-
-  await window.api.spawnTerminal2();
-
-  // Re-fit both terminals
-  fitAddon.fit();
-  fitAddon2.fit();
-
-  showToast('Second terminal opened', 'info');
-});
-
-document.querySelector('.close-terminal-btn').addEventListener('click', async () => {
-  await window.api.killTerminal2();
-  const pane1 = document.getElementById('terminal-pane-1');
-  pane1.classList.add('hidden');
-  if (term2) {
-    term2.dispose();
-    term2 = null;
-    fitAddon2 = null;
+function createMessageEl(role, content = '') {
+  const div = document.createElement('div');
+  div.className = `chat-msg chat-msg-${role}`;
+  if (role === 'user') {
+    div.textContent = content;
+  } else if (role === 'assistant') {
+    const pre = document.createElement('pre');
+    pre.className = 'chat-text';
+    pre.textContent = content;
+    div.appendChild(pre);
+  } else if (role === 'error') {
+    div.textContent = '⚠ ' + content;
+  } else if (role === 'system') {
+    div.textContent = content;
   }
-  fitAddon.fit();
-  showToast('Second terminal closed', 'info');
+  chatMessages.appendChild(div);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+  return div;
+}
+
+function createToolChipEl(name, input) {
+  const div = document.createElement('div');
+  div.className = 'chat-tool-chip';
+  const header = document.createElement('div');
+  header.className = 'tool-chip-header';
+  header.innerHTML = `<span class="tool-name">⚙ ${name}</span><span class="tool-status tool-status-running">running…</span>`;
+  div.appendChild(header);
+  if (input && Object.keys(input).length > 0) {
+    const details = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = 'Input';
+    const pre = document.createElement('pre');
+    pre.textContent = JSON.stringify(input, null, 2);
+    details.appendChild(summary);
+    details.appendChild(pre);
+    div.appendChild(details);
+  }
+  chatMessages.appendChild(div);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+  return div;
+}
+
+const pendingToolChips = {};
+
+window.api.onChatStream(({ text }) => {
+  if (!streamingEl) {
+    streamingEl = createMessageEl('assistant');
+  }
+  const pre = streamingEl.querySelector('.chat-text');
+  if (pre) pre.textContent += text;
+  chatMessages.scrollTop = chatMessages.scrollHeight;
 });
 
-// ResizeObserver for terminal 2
-const term2Observer = new ResizeObserver(() => {
-  if (fitAddon2) fitAddon2.fit();
+window.api.onChatToolCall(({ name, input }) => {
+  const chip = createToolChipEl(name, input);
+  pendingToolChips[name + JSON.stringify(input)] = chip;
 });
-term2Observer.observe(document.getElementById('terminal-2'));
+
+window.api.onChatToolResult(({ name, input, result }) => {
+  const key = name + JSON.stringify(input);
+  const chip = pendingToolChips[key];
+  if (chip) {
+    const status = chip.querySelector('.tool-status');
+    if (status) {
+      if (result?.error) {
+        status.textContent = '✗ error';
+        status.className = 'tool-status tool-status-error';
+      } else {
+        status.textContent = '✓ done';
+        status.className = 'tool-status tool-status-done';
+      }
+    }
+    const details = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = 'Result';
+    const pre = document.createElement('pre');
+    pre.textContent = JSON.stringify(result, null, 2);
+    details.appendChild(summary);
+    details.appendChild(pre);
+    chip.appendChild(details);
+    delete pendingToolChips[key];
+  }
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+});
+
+window.api.onChatDone(() => {
+  streamingEl = null;
+  isSending = false;
+  chatInput.disabled = false;
+  chatSendBtn.disabled = false;
+  chatInput.focus();
+});
+
+window.api.onChatError(({ message }) => {
+  streamingEl = null;
+  createMessageEl('error', message);
+  isSending = false;
+  chatInput.disabled = false;
+  chatSendBtn.disabled = false;
+});
+
+async function sendMessage() {
+  const text = chatInput.value.trim();
+  if (!text || isSending) return;
+  isSending = true;
+  chatInput.value = '';
+  chatInput.disabled = true;
+  chatSendBtn.disabled = true;
+  streamingEl = null;
+  createMessageEl('user', text);
+  window.api.sendMessage(text);
+}
+
+chatSendBtn.addEventListener('click', sendMessage);
+chatInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+chatClearBtn.addEventListener('click', async () => {
+  await window.api.clearHistory();
+  chatMessages.innerHTML = '';
+  streamingEl = null;
+});
+
+// Settings panel
+settingsBtn.addEventListener('click', () => {
+  settingsPanel.classList.toggle('hidden');
+});
+
+async function loadSettingsUI() {
+  const settings = await window.api.getSettings();
+  providerSelect.value = settings.activeProvider;
+  document.getElementById('key-anthropic').value   = settings.providers.anthropic.apiKey  || '';
+  document.getElementById('model-anthropic').value = settings.providers.anthropic.model   || 'claude-opus-4-5';
+  document.getElementById('key-openai').value      = settings.providers.openai.apiKey     || '';
+  document.getElementById('model-openai').value    = settings.providers.openai.model      || 'gpt-4o';
+  document.getElementById('key-gemini').value      = settings.providers.gemini.apiKey     || '';
+  document.getElementById('model-gemini').value    = settings.providers.gemini.model      || 'gemini-2.0-flash';
+  document.getElementById('model-ollama').value    = settings.providers.ollama.model      || 'llama3.2';
+}
+
+providerSelect.addEventListener('change', async () => {
+  const settings = await window.api.getSettings();
+  settings.activeProvider = providerSelect.value;
+  await window.api.saveSettings(settings);
+});
+
+settingsSaveBtn.addEventListener('click', async () => {
+  const settings = await window.api.getSettings();
+  settings.activeProvider = providerSelect.value;
+  settings.providers.anthropic.apiKey  = document.getElementById('key-anthropic').value.trim();
+  settings.providers.anthropic.model   = document.getElementById('model-anthropic').value.trim();
+  settings.providers.openai.apiKey     = document.getElementById('key-openai').value.trim();
+  settings.providers.openai.model      = document.getElementById('model-openai').value.trim();
+  settings.providers.gemini.apiKey     = document.getElementById('key-gemini').value.trim();
+  settings.providers.gemini.model      = document.getElementById('model-gemini').value.trim();
+  settings.providers.ollama.model      = document.getElementById('model-ollama').value.trim();
+  await window.api.saveSettings(settings);
+  settingsPanel.classList.add('hidden');
+  showToast('Settings saved', 'success');
+});
+
+loadSettingsUI();
 
 // ── 3D Viewport ─────────────────────────────────────────────────────────
 
@@ -1322,14 +1396,6 @@ cpContextMenu.addEventListener('click', async (e) => {
       editorPanel.classList.remove('collapsed');
       break;
     }
-    case 'resume-session': {
-      if (cp?.sessionId) {
-        const ok = await window.api.restoreCheckpointSession(id);
-        if (ok) showToast('Resuming session from this checkpoint', 'info');
-        else showToast('No linked session', 'error');
-      }
-      break;
-    }
     case 'branch-here': {
       window.api.selectCheckpoint(id);
       showToast(`Branching from "${cp?.label || cp?.file}" — next model will be a child`, 'info');
@@ -1338,33 +1404,9 @@ cpContextMenu.addEventListener('click', async (e) => {
   }
 });
 
-// Resume session button in checkpoint header
-const resumeSessionBtn = document.getElementById('resume-session-btn');
-resumeSessionBtn.addEventListener('click', async () => {
-  if (!checkpointState.active) return;
-  const ok = await window.api.restoreCheckpointSession(checkpointState.active);
-  if (ok) {
-    showToast('Resuming conversation from this checkpoint', 'info');
-  } else {
-    showToast('No linked session for this checkpoint', 'error');
-  }
-});
-
-function updateResumeButton() {
-  const cp =
-    checkpointState.active &&
-    checkpointState.checkpoints[checkpointState.active];
-  if (cp && cp.sessionId) {
-    resumeSessionBtn.classList.remove('hidden');
-  } else {
-    resumeSessionBtn.classList.add('hidden');
-  }
-}
-
 window.api.onCheckpointUpdate((state) => {
   checkpointState = state;
   renderTree();
-  updateResumeButton();
 
   // Refresh viewport 2's tree if open
   if (viewport2 && viewport2._cpListener) viewport2._cpListener();
@@ -1382,77 +1424,6 @@ window.api.getCheckpoints().then((state) => {
   renderTree();
 });
 
-// ── Session Browser ─────────────────────────────────────────────────────
-
-const sessionBtn = document.getElementById('session-btn');
-const sessionDropdown = document.getElementById('session-dropdown');
-const sessionList = document.getElementById('session-list');
-
-sessionBtn.addEventListener('click', async (e) => {
-  e.stopPropagation();
-  const isHidden = sessionDropdown.classList.contains('hidden');
-  if (isHidden) {
-    sessionDropdown.classList.remove('hidden');
-    await loadSessions();
-  } else {
-    sessionDropdown.classList.add('hidden');
-  }
-});
-
-// Close dropdown when clicking elsewhere
-document.addEventListener('click', (e) => {
-  if (!sessionDropdown.contains(e.target) && e.target !== sessionBtn) {
-    sessionDropdown.classList.add('hidden');
-  }
-});
-
-document.getElementById('session-new').addEventListener('click', () => {
-  window.api.newSession();
-  sessionDropdown.classList.add('hidden');
-  showToast('New session started', 'info');
-});
-
-document.getElementById('session-continue').addEventListener('click', () => {
-  window.api.continueSession();
-  sessionDropdown.classList.add('hidden');
-  showToast('Continuing last session', 'info');
-});
-
-async function loadSessions() {
-  const sessions = await window.api.getSessions();
-  sessionList.innerHTML = '';
-
-  if (sessions.length === 0) {
-    sessionList.innerHTML = '<div class="session-empty">No previous sessions</div>';
-    return;
-  }
-
-  for (const s of sessions.slice(0, 20)) {
-    const item = document.createElement('div');
-    item.className = 'session-item';
-
-    const dateEl = document.createElement('div');
-    dateEl.className = 'session-item-date';
-    const d = new Date(s.date);
-    dateEl.textContent = d.toLocaleDateString([], {
-      month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
-    });
-
-    const msgEl = document.createElement('div');
-    msgEl.className = 'session-item-msg';
-    msgEl.textContent = s.firstMessage || '(empty session)';
-
-    item.appendChild(dateEl);
-    item.appendChild(msgEl);
-    item.addEventListener('click', () => {
-      window.api.resumeSession(s.sessionId);
-      sessionDropdown.classList.add('hidden');
-      showToast('Resuming session', 'info');
-    });
-
-    sessionList.appendChild(item);
-  }
-}
 
 // ── Status Bar ──────────────────────────────────────────────────────────
 
