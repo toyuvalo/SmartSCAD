@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SmartSCAD</title>
+  <link rel="stylesheet" href="./node_modules/@xterm/xterm/css/xterm.css">
   <link rel="stylesheet" href="./dist/renderer.css">
   <link rel="stylesheet" href="./style.css">
 </head>
@@ -154,44 +155,18 @@
       <!-- Splitter -->
       <div id="splitter"></div>
 
-      <!-- Right: AI Chat -->
+      <!-- Right: Terminal with Provider Selection -->
       <div id="right-panel">
-        <div id="chat-header">
-          <select id="provider-select">
-            <option value="anthropic">Claude (Anthropic)</option>
-            <option value="openai">GPT (OpenAI)</option>
-            <option value="gemini">Gemini (Google)</option>
-            <option value="ollama">Ollama (Local)</option>
-          </select>
-          <button id="settings-btn" class="icon-btn" title="API Keys &amp; Settings">⚙</button>
-          <button id="chat-clear-btn" class="icon-btn" title="Clear conversation">✕</button>
-        </div>
-
-        <div id="settings-panel" class="hidden">
-          <div class="settings-section">
-            <div class="settings-row"><label>Anthropic API Key</label><input type="password" id="key-anthropic" placeholder="sk-ant-..."></div>
-            <div class="settings-row"><label>Model</label><input type="text" id="model-anthropic" value="claude-opus-4-5"></div>
+        <div class="terminal-pane" id="terminal-pane-0">
+          <div class="terminal-pane-header">
+            <select id="provider-select" title="Choose AI CLI">
+              <option value="claude">Claude</option>
+              <option value="codex">Codex</option>
+              <option value="gemini">Gemini</option>
+            </select>
+            <span class="spacer"></span>
           </div>
-          <div class="settings-section">
-            <div class="settings-row"><label>OpenAI API Key</label><input type="password" id="key-openai" placeholder="sk-..."></div>
-            <div class="settings-row"><label>Model</label><input type="text" id="model-openai" value="gpt-4o"></div>
-          </div>
-          <div class="settings-section">
-            <div class="settings-row"><label>Gemini API Key</label><input type="password" id="key-gemini" placeholder="AIza..."></div>
-            <div class="settings-row"><label>Model</label><input type="text" id="model-gemini" value="gemini-2.0-flash"></div>
-          </div>
-          <div class="settings-section">
-            <div class="settings-row"><label>Ollama Model</label><input type="text" id="model-ollama" value="llama3.2"></div>
-            <div class="settings-row"><small>No API key needed — connects to localhost:11434</small></div>
-          </div>
-          <button id="settings-save-btn" class="icon-btn">Save Settings</button>
-        </div>
-
-        <div id="chat-messages"></div>
-
-        <div id="chat-input-area">
-          <textarea id="chat-input" placeholder="Describe a 3D model to create, or ask to modify the current one…" rows="3"></textarea>
-          <button id="chat-send">Send</button>
+          <div class="terminal-container" id="terminal"></div>
         </div>
       </div>
     </div>

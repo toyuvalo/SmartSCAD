@@ -1,3 +1,5 @@
+import { Terminal } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
 import * as THREE from 'three';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -187,186 +189,69 @@ window.api.onFileContent((data) => {
   if (model) monaco.editor.setModelMarkers(model, 'openscad', []);
 });
 
-// ── Chat UI ──────────────────────────────────────────────────────────────
+// ── Terminal Setup ──────────────────────────────────────────────────────
 
-const chatMessages = document.getElementById('chat-messages');
-const chatInput = document.getElementById('chat-input');
-const chatSendBtn = document.getElementById('chat-send');
-const chatClearBtn = document.getElementById('chat-clear-btn');
-const settingsBtn = document.getElementById('settings-btn');
-const settingsPanel = document.getElementById('settings-panel');
-const settingsSaveBtn = document.getElementById('settings-save-btn');
+const term = new Terminal({
+  fontSize: 14,
+  fontFamily: '"JetBrains Mono", Menlo, Monaco, "Courier New", monospace',
+  theme: {
+    background: '#0d0d1a',
+    foreground: '#d0d0e0',
+    cursor: '#d0d0e0',
+    cursorAccent: '#0d0d1a',
+    selectionBackground: '#33336688',
+    black: '#1a1a2e',
+    red: '#ff5555',
+    green: '#50fa7b',
+    yellow: '#f1fa8c',
+    blue: '#6272a4',
+    magenta: '#ff79c6',
+    cyan: '#8be9fd',
+    white: '#d0d0e0',
+    brightBlack: '#44447a',
+    brightRed: '#ff6e6e',
+    brightGreen: '#69ff94',
+    brightYellow: '#ffffa5',
+    brightBlue: '#d6acff',
+    brightMagenta: '#ff92df',
+    brightCyan: '#a4ffff',
+    brightWhite: '#ffffff',
+  },
+  cursorBlink: true,
+  allowProposedApi: true,
+});
+
+const fitAddon = new FitAddon();
+term.loadAddon(fitAddon);
+
+const termEl = document.getElementById('terminal');
+term.open(termEl);
+fitAddon.fit();
+term.focus();
+termEl.addEventListener('click', () => term.focus());
+
+window.api.onTerminalData((data) => term.write(data));
+term.onData((data) => window.api.sendTerminalInput(data));
+term.onResize(({ cols, rows }) => window.api.resizeTerminal(cols, rows));
+
+// Signal main process that the terminal is ready
+window.api.terminalReady();
+
+// Provider selector — switch CLI on change
 const providerSelect = document.getElementById('provider-select');
-
-let streamingEl = null;
-let isSending = false;
-
-function createMessageEl(role, content = '') {
-  const div = document.createElement('div');
-  div.className = `chat-msg chat-msg-${role}`;
-  if (role === 'user') {
-    div.textContent = content;
-  } else if (role === 'assistant') {
-    const pre = document.createElement('pre');
-    pre.className = 'chat-text';
-    pre.textContent = content;
-    div.appendChild(pre);
-  } else if (role === 'error') {
-    div.textContent = '⚠ ' + content;
-  } else if (role === 'system') {
-    div.textContent = content;
-  }
-  chatMessages.appendChild(div);
-  chatMessages.scrollTop = chatMessages.scrollHeight;
-  return div;
-}
-
-function createToolChipEl(name, input) {
-  const div = document.createElement('div');
-  div.className = 'chat-tool-chip';
-  const header = document.createElement('div');
-  header.className = 'tool-chip-header';
-  header.innerHTML = `<span class="tool-name">⚙ ${name}</span><span class="tool-status tool-status-running">running…</span>`;
-  div.appendChild(header);
-  if (input && Object.keys(input).length > 0) {
-    const details = document.createElement('details');
-    const summary = document.createElement('summary');
-    summary.textContent = 'Input';
-    const pre = document.createElement('pre');
-    pre.textContent = JSON.stringify(input, null, 2);
-    details.appendChild(summary);
-    details.appendChild(pre);
-    div.appendChild(details);
-  }
-  chatMessages.appendChild(div);
-  chatMessages.scrollTop = chatMessages.scrollHeight;
-  return div;
-}
-
-const pendingToolChips = {};
-
-window.api.onChatStream(({ text }) => {
-  if (!streamingEl) {
-    streamingEl = createMessageEl('assistant');
-  }
-  const pre = streamingEl.querySelector('.chat-text');
-  if (pre) pre.textContent += text;
-  chatMessages.scrollTop = chatMessages.scrollHeight;
-});
-
-window.api.onChatToolCall(({ name, input }) => {
-  const chip = createToolChipEl(name, input);
-  pendingToolChips[name + JSON.stringify(input)] = chip;
-});
-
-window.api.onChatToolResult(({ name, input, result }) => {
-  const key = name + JSON.stringify(input);
-  const chip = pendingToolChips[key];
-  if (chip) {
-    const status = chip.querySelector('.tool-status');
-    if (status) {
-      if (result?.error) {
-        status.textContent = '✗ error';
-        status.className = 'tool-status tool-status-error';
-      } else {
-        status.textContent = '✓ done';
-        status.className = 'tool-status tool-status-done';
-      }
-    }
-    const details = document.createElement('details');
-    const summary = document.createElement('summary');
-    summary.textContent = 'Result';
-    const pre = document.createElement('pre');
-    pre.textContent = JSON.stringify(result, null, 2);
-    details.appendChild(summary);
-    details.appendChild(pre);
-    chip.appendChild(details);
-    delete pendingToolChips[key];
-  }
-  chatMessages.scrollTop = chatMessages.scrollHeight;
-});
-
-window.api.onChatDone(() => {
-  streamingEl = null;
-  isSending = false;
-  chatInput.disabled = false;
-  chatSendBtn.disabled = false;
-  chatInput.focus();
-});
-
-window.api.onChatError(({ message }) => {
-  streamingEl = null;
-  createMessageEl('error', message);
-  isSending = false;
-  chatInput.disabled = false;
-  chatSendBtn.disabled = false;
-});
-
-async function sendMessage() {
-  const text = chatInput.value.trim();
-  if (!text || isSending) return;
-  isSending = true;
-  chatInput.value = '';
-  chatInput.disabled = true;
-  chatSendBtn.disabled = true;
-  streamingEl = null;
-  createMessageEl('user', text);
-  window.api.sendMessage(text);
-}
-
-chatSendBtn.addEventListener('click', sendMessage);
-chatInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    sendMessage();
-  }
-});
-
-chatClearBtn.addEventListener('click', async () => {
-  await window.api.clearHistory();
-  chatMessages.innerHTML = '';
-  streamingEl = null;
-});
-
-// Settings panel
-settingsBtn.addEventListener('click', () => {
-  settingsPanel.classList.toggle('hidden');
-});
-
-async function loadSettingsUI() {
-  const settings = await window.api.getSettings();
-  providerSelect.value = settings.activeProvider;
-  document.getElementById('key-anthropic').value   = settings.providers.anthropic.apiKey  || '';
-  document.getElementById('model-anthropic').value = settings.providers.anthropic.model   || 'claude-opus-4-5';
-  document.getElementById('key-openai').value      = settings.providers.openai.apiKey     || '';
-  document.getElementById('model-openai').value    = settings.providers.openai.model      || 'gpt-4o';
-  document.getElementById('key-gemini').value      = settings.providers.gemini.apiKey     || '';
-  document.getElementById('model-gemini').value    = settings.providers.gemini.model      || 'gemini-2.0-flash';
-  document.getElementById('model-ollama').value    = settings.providers.ollama.model      || 'llama3.2';
-}
-
 providerSelect.addEventListener('change', async () => {
-  const settings = await window.api.getSettings();
-  settings.activeProvider = providerSelect.value;
-  await window.api.saveSettings(settings);
+  const provider = providerSelect.value;
+  term.clear();
+  await window.api.switchProvider(provider);
+  showToast(`Switched to ${providerSelect.options[providerSelect.selectedIndex].text}`, 'info');
+  term.focus();
 });
 
-settingsSaveBtn.addEventListener('click', async () => {
-  const settings = await window.api.getSettings();
-  settings.activeProvider = providerSelect.value;
-  settings.providers.anthropic.apiKey  = document.getElementById('key-anthropic').value.trim();
-  settings.providers.anthropic.model   = document.getElementById('model-anthropic').value.trim();
-  settings.providers.openai.apiKey     = document.getElementById('key-openai').value.trim();
-  settings.providers.openai.model      = document.getElementById('model-openai').value.trim();
-  settings.providers.gemini.apiKey     = document.getElementById('key-gemini').value.trim();
-  settings.providers.gemini.model      = document.getElementById('model-gemini').value.trim();
-  settings.providers.ollama.model      = document.getElementById('model-ollama').value.trim();
-  await window.api.saveSettings(settings);
-  settingsPanel.classList.add('hidden');
-  showToast('Settings saved', 'success');
+// Resize observer for terminal
+const termResizeObserver = new ResizeObserver(() => {
+  fitAddon.fit();
 });
-
-loadSettingsUI();
+termResizeObserver.observe(termEl);
 
 // ── 3D Viewport ─────────────────────────────────────────────────────────
 

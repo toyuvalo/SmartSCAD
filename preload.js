@@ -1,22 +1,12 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
-  // Settings
-  getSettings:  () => ipcRenderer.invoke('settings:get'),
-  saveSettings: (s) => ipcRenderer.invoke('settings:save', s),
-
-  // Chat
-  sendMessage:    (msg) => ipcRenderer.invoke('chat:send', msg),
-  abortMessage:   () => ipcRenderer.send('chat:abort'),
-  getChatHistory: () => ipcRenderer.invoke('chat:history'),
-  clearHistory:   () => ipcRenderer.invoke('chat:clear'),
-
-  // Chat stream events (main → renderer)
-  onChatStream:     (cb) => ipcRenderer.on('chat:stream',      (_, d) => cb(d)),
-  onChatToolCall:   (cb) => ipcRenderer.on('chat:tool_call',   (_, d) => cb(d)),
-  onChatToolResult: (cb) => ipcRenderer.on('chat:tool_result', (_, d) => cb(d)),
-  onChatDone:       (cb) => ipcRenderer.on('chat:done',        (_, d) => cb(d)),
-  onChatError:      (cb) => ipcRenderer.on('chat:error',       (_, d) => cb(d)),
+  // Terminal
+  onTerminalData:    (cb) => ipcRenderer.on('terminal:data', (_, data) => cb(data)),
+  terminalReady:     () => ipcRenderer.send('terminal:ready'),
+  sendTerminalInput: (data) => ipcRenderer.send('terminal:input', data),
+  resizeTerminal:    (cols, rows) => ipcRenderer.send('terminal:resize', { cols, rows }),
+  switchProvider:    (provider) => ipcRenderer.invoke('terminal:switch-provider', provider),
 
   // Model updates (3D viewer)
   onModelUpdate: (cb) => ipcRenderer.on('model:update', (_, data) => cb(data)),
