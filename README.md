@@ -3,6 +3,8 @@
 AI-powered 3D CAD — multi-provider CLI edition  
 OpenSCAD + provider dropdown (Claude Code · Codex · Gemini CLI), terminal-based
 
+**[Project page →](https://webdev.dvlce.ca/openscad)**
+
 ---
 
 SmartSCAD is a fork of ClawSCAD that replaces the single embedded Claude Code terminal with a multi-provider CLI switcher. Same Electron app, same live 3D viewport and checkpoint system — but you can switch between Claude Code, Codex CLI, and Gemini CLI from a dropdown, and each provider gets its own isolated workspace.
@@ -69,6 +71,7 @@ SmartSCAD/
 ## Related
 
 - [ClawSCAD](https://github.com/toyuvalo/ClawSCAD) — the original version with Claude Code + MCP server for full agentic sessions
+- [webdev.dvlce.ca/openscad](https://webdev.dvlce.ca/openscad) — project page
 
 ## License
 
