@@ -45,6 +45,7 @@
       "scripts/**/*",
       "style.css",
       "icon.png",
+      "icon.ico",
       "dist/**/*",
       "node_modules/**/*",
       "!node_modules/.cache"
@@ -53,6 +54,10 @@
       {
         "from": "icon.png",
         "to": "icon.png"
+      },
+      {
+        "from": "icon.ico",
+        "to": "icon.ico"
       }
     ],
     "linux": {
@@ -76,7 +81,7 @@
           ]
         }
       ],
-      "icon": "icon.png"
+      "icon": "icon.ico"
     },
     "nsis": {
       "oneClick": false,
